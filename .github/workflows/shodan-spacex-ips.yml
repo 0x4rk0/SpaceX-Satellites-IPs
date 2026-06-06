@@ -1,0 +1,56 @@
+name: Collect Shodan SpaceX IPs
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: "Shodan result pages to fetch, 100 results per page"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    name: Collect org:spacex targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SHODAN_QUERY: "org:spacex"
+      SHODAN_MAX_PAGES: ${{ github.event.inputs.max_pages || '1' }}
+      shodan_key: ${{ secrets.shodan_key }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Collect IPs from Shodan
+        run: |
+          python3 scripts/collect_shodan_spacex_ips.py \
+            --query "$SHODAN_QUERY" \
+            --max-pages "$SHODAN_MAX_PAGES" \
+            --targets-file targets/spacex_ips.tsv \
+            --by-country-dir targets/by-country
+
+      - name: Upload Shodan target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shodan-spacex-ip-targets
+          path: |
+            targets/spacex_ips.tsv
+            targets/by-country/
+
+      - name: Commit Shodan target output
+        run: |
+          if [ -z "$(git status --porcelain -- targets/spacex_ips.tsv targets/by-country)" ]; then
+            echo "No Shodan target changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add targets/spacex_ips.tsv targets/by-country
+          git commit -m "Update Shodan SpaceX IP targets"
+          git push
