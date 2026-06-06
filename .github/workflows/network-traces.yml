@@ -1,0 +1,59 @@
+name: SpaceX localhost network traces
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/network-traces.yml"
+      - "scripts/run_network_traces.sh"
+      - "targets/spacex_ips.tsv"
+
+permissions:
+  contents: write
+
+jobs:
+  traces:
+    name: Run network traces against SpaceX targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      MTR_CYCLES: "10"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure traceroute fallback is available
+        run: |
+          if command -v mtr >/dev/null 2>&1 || command -v traceroute >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y traceroute
+
+      - name: Run network traces
+        run: |
+          sudo -E bash scripts/run_network_traces.sh targets/spacex_ips.tsv traces
+          sudo chown -R "$(id -u):$(id -g)" traces
+
+      - name: Upload trace artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacex-localhost-network-traces
+          path: traces/
+          if-no-files-found: ignore
+
+      - name: Commit trace output
+        run: |
+          if [ -z "$(git status --porcelain -- traces)" ]; then
+            echo "No trace changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add traces
+          git commit -m "Store SpaceX localhost network traces"
+          git push

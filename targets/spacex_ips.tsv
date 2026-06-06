@@ -1,0 +1,5 @@
+# country_code	ip_address
+# Add one SpaceX target IP per line using a two-letter ISO 3166-1 alpha-2 country code.
+# Examples:
+# US	203.0.113.10
+# CA	2001:db8::10
