@@ -13,8 +13,8 @@ US	203.0.113.10
 CA	2001:db8::10
 ```
 
-Use two-letter ISO 3166-1 alpha-2 country codes. The workflow writes matching
-reports to `traces/<ISO>/localhost-traces.txt`.
+Use two-letter ISO 3166-1 alpha-2 country codes. The workflow writes discovered
+satellite IP candidates to `spacex_sat_ips/<ISO>/ips.txt`.
 
 ## Collect targets from Shodan
 
@@ -33,12 +33,14 @@ successfully, the network trace workflow runs against the generated target list.
 
 ## Run traces
 
-The workflow runs manually from **Actions > SpaceX localhost network traces > Run workflow**.
+The workflow runs manually from **Actions > SpaceX satellite IP discovery > Run workflow**.
 It also runs after the Shodan collector succeeds, and when the target list,
 workflow, or runner script changes.
 
-The workflow uses GitHub's free `ubuntu-latest` hosted runner. It prefers `mtr`
-when that tool is already available; otherwise it uses `traceroute`.
+The workflow uses GitHub's free `ubuntu-latest` hosted runner and runs
+`traceroute` against each target.
 
-Only trace reports containing a hop whose hostname is exactly `localhost` are
-stored. Those `localhost` hostname hits are treated as SpaceX IP results.
+For each target, the script finds the target IP in the traceroute hop list and
+saves the two hop IPs immediately before it as SpaceX satellite IP candidates.
+Unique candidates are stored in `spacex_sat_ips/<ISO>/ips.txt`, with target-level
+details in `spacex_sat_ips/<ISO>/targets.tsv`.

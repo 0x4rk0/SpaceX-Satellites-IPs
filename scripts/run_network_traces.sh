@@ -2,20 +2,15 @@
 set -euo pipefail
 
 targets_file="${1:-targets/spacex_ips.tsv}"
-output_dir="${2:-traces}"
-mtr_cycles="${MTR_CYCLES:-10}"
+output_dir="${2:-spacex_sat_ips}"
 
 if [[ ! -f "$targets_file" ]]; then
   echo "Target file not found: $targets_file" >&2
   exit 1
 fi
 
-if command -v mtr >/dev/null 2>&1; then
-  trace_tool="mtr"
-elif command -v traceroute >/dev/null 2>&1; then
-  trace_tool="traceroute"
-else
-  echo "Neither mtr nor traceroute is installed." >&2
+if ! command -v traceroute >/dev/null 2>&1; then
+  echo "traceroute is not installed." >&2
   exit 1
 fi
 
@@ -29,48 +24,88 @@ saved_count=0
 skipped_count=0
 failed_count=0
 
-has_localhost_hop() {
+extract_sat_ips_before_target() {
   local report_file="$1"
+  local target_ip="$2"
 
-  grep -Eq '^[[:space:]]*[0-9]+([.)|][^[:space:]]*)?[[:space:]]+localhost([[:space:]]|\(|$)' "$report_file"
+  python3 - "$report_file" "$target_ip" <<'PY'
+import ipaddress
+import re
+import sys
+
+report_path = sys.argv[1]
+target_ip = str(ipaddress.ip_address(sys.argv[2]))
+ip_pattern = re.compile(
+    r"\(([^)]+)\)|"
+    r"(?<![A-Za-z0-9:])(\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f]{0,4}:[0-9A-Fa-f:.]+)(?![A-Za-z0-9:])"
+)
+hop_ips = []
+
+with open(report_path, encoding="utf-8", errors="replace") as report:
+    for line in report:
+        if not re.match(r"^\s*\d+\s+", line):
+            continue
+
+        for match in ip_pattern.finditer(line):
+            candidate = (match.group(1) or match.group(2) or "").strip("[]")
+            try:
+                ip = str(ipaddress.ip_address(candidate))
+            except ValueError:
+                continue
+
+            if not hop_ips or hop_ips[-1] != ip:
+                hop_ips.append(ip)
+
+try:
+    target_index = hop_ips.index(target_ip)
+except ValueError:
+    sys.exit(2)
+
+sat_ips = hop_ips[max(0, target_index - 2):target_index]
+if len(sat_ips) != 2:
+    sys.exit(3)
+
+print("\t".join(sat_ips))
+PY
 }
 
 run_trace() {
   local ip_address="$1"
 
-  if [[ "$trace_tool" == "mtr" ]]; then
-    mtr -r -w -b -c "$mtr_cycles" "$ip_address"
-  else
-    traceroute "$ip_address"
-  fi
+  traceroute "$ip_address"
 }
 
-append_report() {
+append_sat_ips() {
   local country_code="$1"
-  local ip_address="$2"
-  local report_file="$3"
-  local trace_status="$4"
+  local target_ip="$2"
+  local sat_ip_1="$3"
+  local sat_ip_2="$4"
+  local trace_status="$5"
   local country_dir="$output_dir/$country_code"
-  local country_report="$country_dir/localhost-traces.txt"
+  local country_ips="$country_dir/ips.txt"
+  local country_targets="$country_dir/targets.tsv"
 
   mkdir -p "$country_dir"
 
-  if [[ ! -f "$country_report" ]]; then
+  if [[ ! -f "$country_targets" ]]; then
     {
-      echo "# localhost network traces for $country_code"
+      echo "# SpaceX satellite IP candidates for $country_code"
       echo "# Generated: $run_started_at"
       echo "# Input: $targets_file"
-      echo "# Preferred tool: mtr when available, otherwise traceroute"
-      echo "# MTR cycles: $mtr_cycles"
-      echo
-    } >"$country_report"
+      echo "# Extracted from the two traceroute hop IPs immediately before each scanned target IP."
+      printf 'target_ip\tsat_ip_1\tsat_ip_2\tcaptured_at\ttraceroute_exit\n'
+    } >"$country_targets"
   fi
 
-  {
-    echo "===== target: $ip_address | country: $country_code | tool: $trace_tool | captured: $(date -u +"%Y-%m-%dT%H:%M:%SZ") | exit: $trace_status ====="
-    cat "$report_file"
-    echo
-  } >>"$country_report"
+  printf '%s\n%s\n' "$sat_ip_1" "$sat_ip_2" >>"$country_ips"
+  sort -u "$country_ips" -o "$country_ips"
+
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$target_ip" \
+    "$sat_ip_1" \
+    "$sat_ip_2" \
+    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    "$trace_status" >>"$country_targets"
 }
 
 while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
@@ -92,7 +127,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
   target_count=$((target_count + 1))
   report_file="$tmp_dir/${country_code}_${target_count}.txt"
 
-  echo "Running $trace_tool for $ip_address ($country_code)..."
+  echo "Running traceroute for $ip_address ($country_code)..."
   set +e
   run_trace "$ip_address" >"$report_file" 2>&1
   trace_status=$?
@@ -102,20 +137,25 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     failed_count=$((failed_count + 1))
   fi
 
-  if has_localhost_hop "$report_file"; then
-    append_report "$country_code" "$ip_address" "$report_file" "$trace_status"
+  set +e
+  sat_ips="$(extract_sat_ips_before_target "$report_file" "$ip_address")"
+  extract_status=$?
+  set -e
+
+  if [[ "$extract_status" -eq 0 ]]; then
+    IFS=$'\t' read -r sat_ip_1 sat_ip_2 <<<"$sat_ips"
+    append_sat_ips "$country_code" "$ip_address" "$sat_ip_1" "$sat_ip_2" "$trace_status"
     saved_count=$((saved_count + 1))
   else
     skipped_count=$((skipped_count + 1))
-    echo "No localhost hostname found for $ip_address; trace not saved."
+    echo "Could not find two hop IPs immediately before target $ip_address; satellite IPs not saved."
   fi
 done <"$targets_file"
 
 cat <<EOF
-Network trace run complete.
-Trace tool: $trace_tool
+Traceroute satellite IP discovery complete.
 Targets processed: $target_count
-Reports saved: $saved_count
-Reports skipped without localhost: $skipped_count
-Trace command failures: $failed_count
+Targets with satellite IPs saved: $saved_count
+Targets skipped without two preceding hop IPs: $skipped_count
+Traceroute command failures: $failed_count
 EOF
